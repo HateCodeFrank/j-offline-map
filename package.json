@@ -1,6 +1,6 @@
 {
   "name": "j-offline-map",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Vue 3 offline PMTiles map component based on Leaflet",
   "type": "module",
   "main": "./dist/j-offline-map.umd.cjs",
