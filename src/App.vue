@@ -47,6 +47,12 @@ const loadExampleRoute = () => {
   offlineMapRef.value?.drawRoute(pengzhouToChengduRoute);
 };
 
+// 加载路线并播放循环箭头动画
+const playExampleRoute = () => {
+  offlineMapRef.value?.drawRoute(pengzhouToChengduRoute);
+  offlineMapRef.value?.playRouteAnimation({ duration: 10000, loop: true });
+};
+
 // 输出手工绘制完成的路线
 const handleDrawFinish = (points: MapPoint[]) => {
   console.log("绘制完成：", points);
@@ -57,6 +63,16 @@ const handleDrawFinish = (points: MapPoint[]) => {
   <main class="demo-page">
     <div class="demo-toolbar" @click.stop @pointerdown.stop>
       <button type="button" @click="loadExampleRoute">加载彭州到成都示例</button>
+      <button type="button" @click="playExampleRoute">播放路线动画</button>
+      <button type="button" @click="offlineMapRef?.pauseRouteAnimation()">
+        暂停动画
+      </button>
+      <button type="button" @click="offlineMapRef?.playRouteAnimation()">
+        继续动画
+      </button>
+      <button type="button" @click="offlineMapRef?.stopRouteAnimation()">
+        停止动画
+      </button>
       <button type="button" @click="offlineMapRef?.startDrawing()">
         开始画线
       </button>

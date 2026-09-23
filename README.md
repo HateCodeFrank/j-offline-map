@@ -1,6 +1,6 @@
 # JOfflineMap
 
-基于 Vue 3、Leaflet 和 PMTiles 的离线地图组件，支持外部路线加载和地图点击画线。
+基于 Vue 3、Leaflet 和 PMTiles 的离线地图组件，支持外部路线加载、地图点击画线和路线 Marker 动画。
 
 组件不内置路线操作按钮，业务侧可自行实现 UI，并通过组件实例方法控制绘制、完成、撤销和清除。
 
@@ -84,6 +84,7 @@ const handleDrawFinish = (points: MapPoint[]) => {
 | `restrictBounds` | `boolean` | `true` | 是否限制地图只能在 `bounds` 附近拖动，仅在传入 `bounds` 时生效 |
 | `fitRouteOnChange` | `boolean` | `true` | 路线变化后是否自动缩放到完整路线范围 |
 | `routeStyle` | `RouteStyleOptions` | `{}` | 路线颜色、宽度和透明度配置 |
+| `routeMarkerImage` | `string` | 内置货车图片 | 路线动画 Marker 图片，支持 URL、静态资源路径或 `import` 后的图片地址 |
 
 ## 外部控制
 
@@ -100,8 +101,35 @@ const points = mapRef.value?.finishDrawing();
 // 缩放到路线
 mapRef.value?.fitRoute();
 
+// 播放循环路线动画
+mapRef.value?.playRouteAnimation({
+  duration: 10000,
+  loop: true,
+});
+
+// 暂停并继续路线动画
+mapRef.value?.pauseRouteAnimation();
+mapRef.value?.playRouteAnimation();
+
+// 停止动画并移除箭头
+mapRef.value?.stopRouteAnimation();
+
 // 清除路线
 mapRef.value?.clearRoute();
+```
+
+路线动画会从传入路线的第一个点开始，按照各段实际距离匀速运行。路线坐标越密集，Marker 轨迹越贴近真实道路。
+
+自定义路线 Marker 图片：
+
+```vue
+<script setup lang="ts">
+import customTruck from "./assets/custom-truck.png";
+</script>
+
+<template>
+  <JOfflineMap :route-marker-image="customTruck" />
+</template>
 ```
 
 组件统一使用 `{ lat, lng }`，即纬度在前、经度在后。若转换为 GeoJSON，GeoJSON 坐标顺序为 `[经度, 纬度]`。

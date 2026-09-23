@@ -20,6 +20,14 @@ export interface RouteStyleOptions {
 // 离线底图主题
 export type MapFlavor = "light" | "dark" | "white" | "grayscale" | "black";
 
+// 路线动画配置
+export interface RouteAnimationOptions {
+  /** Marker 从起点运行到终点的时长，单位毫秒 */
+  duration?: number;
+  /** 到达终点后是否从起点继续循环 */
+  loop?: boolean;
+}
+
 // 地图组件对外方法
 export interface JOfflineMapExpose {
   drawRoute: (points: readonly MapPoint[]) => void;
@@ -28,4 +36,7 @@ export interface JOfflineMapExpose {
   finishDrawing: () => MapPoint[];
   undoLastPoint: () => void;
   fitRoute: () => void;
+  playRouteAnimation: (options?: RouteAnimationOptions) => void;
+  pauseRouteAnimation: () => void;
+  stopRouteAnimation: () => void;
 }

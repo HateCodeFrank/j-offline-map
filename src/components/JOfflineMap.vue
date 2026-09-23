@@ -3,13 +3,23 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { CSSProperties } from "vue";
 import L, { type Map as LeafletMap } from "leaflet";
 import { leafletLayer } from "protomaps-leaflet";
+import defaultRouteMarkerImage from "../assets/delivery-truck.png";
 import type {
   JOfflineMapExpose,
   MapBounds,
   MapFlavor,
   MapPoint,
+  RouteAnimationOptions,
   RouteStyleOptions,
 } from "../types";
+
+interface RouteAnimationSegment {
+  from: L.LatLng;
+  to: L.LatLng;
+  startDistance: number;
+  length: number;
+  bearing: number;
+}
 
 // 组件输入参数
 const props = withDefaults(
@@ -44,13 +54,15 @@ const props = withDefaults(
     fitRouteOnChange?: boolean;
     /** 路线颜色、宽度和透明度配置 */
     routeStyle?: RouteStyleOptions;
+    /** 路线动画 Marker 图片，支持外部 URL 或 import 后的图片地址 */
+    routeMarkerImage?: string;
   }>(),
   {
     routePoints: () => [],
     bounds: undefined,
     center: () => ({ lat: 30.657, lng: 104.0668 }),
     zoom: 7,
-    minZoom: 3,
+    minZoom: 5,
     maxZoom: 18,
     maxDataZoom: 15,
     lang: "zh-Hans",
@@ -60,6 +72,7 @@ const props = withDefaults(
     restrictBounds: true,
     fitRouteOnChange: true,
     routeStyle: () => ({}),
+    routeMarkerImage: defaultRouteMarkerImage,
   },
 );
 
@@ -77,10 +90,21 @@ let baseLayer: ReturnType<typeof leafletLayer> | null = null;
 let routeLine: L.Polyline | null = null;
 const currentRoutePoints: L.LatLng[] = [];
 
+// 路线动画运行状态
+const DEFAULT_ROUTE_ANIMATION_DURATION = 12000;
+let routeAnimationMarker: L.Marker | null = null;
+let routeAnimationFrameId: number | null = null;
+let routeAnimationStartedAt = 0;
+let routeAnimationElapsed = 0;
+let routeAnimationDuration = DEFAULT_ROUTE_ANIMATION_DURATION;
+let routeAnimationLoop = true;
+let routeAnimationSegments: RouteAnimationSegment[] = [];
+let routeAnimationTotalDistance = 0;
+
 // 合并路线显示样式
 const currentRouteStyle = computed<L.PolylineOptions>(() => ({
   color: "#1677ff",
-  weight: 5,
+  weight: 4,
   opacity: 0.9,
   ...props.routeStyle,
 }));
@@ -102,6 +126,186 @@ const getLeafletBounds = (bounds: MapBounds) =>
 const getRoutePoints = (): MapPoint[] =>
   currentRoutePoints.map(({ lat, lng }) => ({ lat, lng }));
 
+// 计算路线分段的前进方向
+const getBearing = (from: L.LatLng, to: L.LatLng) => {
+  const fromLat = (from.lat * Math.PI) / 180;
+  const toLat = (to.lat * Math.PI) / 180;
+  const lngDiff = ((to.lng - from.lng) * Math.PI) / 180;
+  const y = Math.sin(lngDiff) * Math.cos(toLat);
+  const x =
+    Math.cos(fromLat) * Math.sin(toLat) -
+    Math.sin(fromLat) * Math.cos(toLat) * Math.cos(lngDiff);
+
+  return (Math.atan2(y, x) * 180) / Math.PI;
+};
+
+// 创建路线动画分段数据
+const createRouteAnimationSegments = () => {
+  let totalDistance = 0;
+  routeAnimationSegments = currentRoutePoints.slice(0, -1).map((from, index) => {
+    const to = currentRoutePoints[index + 1];
+    const length = from.distanceTo(to);
+    const segment = {
+      from,
+      to,
+      startDistance: totalDistance,
+      length,
+      bearing: getBearing(from, to),
+    };
+    totalDistance += length;
+    return segment;
+  });
+  routeAnimationTotalDistance = totalDistance;
+};
+
+// 创建沿路线移动的 Marker 图标
+const createRouteAnimationIcon = () => {
+  const markerElement = document.createElement("span");
+  markerElement.className = "j-offline-map__route-marker";
+
+  const markerImage = document.createElement("img");
+  markerImage.src = props.routeMarkerImage;
+  markerImage.alt = "";
+  markerImage.draggable = false;
+  markerElement.appendChild(markerImage);
+
+  return L.divIcon({
+    className: "j-offline-map__route-marker-icon",
+    html: markerElement,
+    iconSize: [56, 56],
+    iconAnchor: [28, 28],
+  });
+};
+
+// 更新 Marker 位置和朝向
+const updateRouteAnimationPosition = (progress: number) => {
+  if (!routeAnimationMarker || !routeAnimationSegments.length) {
+    return;
+  }
+
+  const targetDistance = routeAnimationTotalDistance * progress;
+  const segment =
+    routeAnimationSegments.find(
+      (item) => targetDistance <= item.startDistance + item.length,
+    ) || routeAnimationSegments[routeAnimationSegments.length - 1];
+  const segmentProgress = segment.length
+    ? Math.min(
+        Math.max((targetDistance - segment.startDistance) / segment.length, 0),
+        1,
+      )
+    : 0;
+  const nextPosition = L.latLng(
+    segment.from.lat + (segment.to.lat - segment.from.lat) * segmentProgress,
+    segment.from.lng + (segment.to.lng - segment.from.lng) * segmentProgress,
+  );
+
+  routeAnimationMarker.setLatLng(nextPosition);
+  const markerElement = routeAnimationMarker
+    .getElement()
+    ?.querySelector<HTMLElement>(".j-offline-map__route-marker");
+  if (markerElement) {
+    markerElement.style.transform = `rotate(${segment.bearing}deg)`;
+  }
+};
+
+// 执行路线动画的下一帧
+const renderRouteAnimationFrame = (timestamp: number) => {
+  const elapsed =
+    routeAnimationElapsed + Math.max(timestamp - routeAnimationStartedAt, 0);
+  const rawProgress = elapsed / routeAnimationDuration;
+  const progress = routeAnimationLoop
+    ? rawProgress % 1
+    : Math.min(rawProgress, 1);
+  updateRouteAnimationPosition(progress);
+
+  if (!routeAnimationLoop && rawProgress >= 1) {
+    routeAnimationFrameId = null;
+    routeAnimationStartedAt = 0;
+    routeAnimationElapsed = routeAnimationDuration;
+    return;
+  }
+
+  routeAnimationFrameId = window.requestAnimationFrame(
+    renderRouteAnimationFrame,
+  );
+};
+
+// 暂停当前路线动画
+const pauseRouteAnimation = () => {
+  if (routeAnimationFrameId === null) {
+    return;
+  }
+
+  const currentElapsed =
+    routeAnimationElapsed +
+    Math.max(window.performance.now() - routeAnimationStartedAt, 0);
+  routeAnimationElapsed = routeAnimationLoop
+    ? currentElapsed % routeAnimationDuration
+    : Math.min(currentElapsed, routeAnimationDuration);
+  window.cancelAnimationFrame(routeAnimationFrameId);
+  routeAnimationFrameId = null;
+  routeAnimationStartedAt = 0;
+};
+
+// 停止路线动画并移除箭头
+const stopRouteAnimation = () => {
+  if (routeAnimationFrameId !== null) {
+    window.cancelAnimationFrame(routeAnimationFrameId);
+  }
+
+  if (map && routeAnimationMarker) {
+    map.removeLayer(routeAnimationMarker);
+  }
+
+  routeAnimationMarker = null;
+  routeAnimationFrameId = null;
+  routeAnimationStartedAt = 0;
+  routeAnimationElapsed = 0;
+  routeAnimationDuration = DEFAULT_ROUTE_ANIMATION_DURATION;
+  routeAnimationLoop = true;
+  routeAnimationSegments = [];
+  routeAnimationTotalDistance = 0;
+};
+
+// 播放或继续播放当前路线动画
+const playRouteAnimation = (options: RouteAnimationOptions = {}) => {
+  if (!map || currentRoutePoints.length < 2 || routeAnimationFrameId !== null) {
+    return;
+  }
+
+  if (options.duration !== undefined) {
+    routeAnimationDuration = Math.max(options.duration, 100);
+  }
+  if (options.loop !== undefined) {
+    routeAnimationLoop = options.loop;
+  }
+
+  if (!routeAnimationSegments.length) {
+    createRouteAnimationSegments();
+  }
+  if (!routeAnimationTotalDistance) {
+    return;
+  }
+
+  if (routeAnimationElapsed >= routeAnimationDuration) {
+    routeAnimationElapsed = 0;
+  }
+  if (!routeAnimationMarker) {
+    routeAnimationMarker = L.marker(currentRoutePoints[0], {
+      icon: createRouteAnimationIcon(),
+      interactive: false,
+      keyboard: false,
+      zIndexOffset: 1000,
+    }).addTo(map);
+  }
+
+  updateRouteAnimationPosition(routeAnimationElapsed / routeAnimationDuration);
+  routeAnimationStartedAt = window.performance.now();
+  routeAnimationFrameId = window.requestAnimationFrame(
+    renderRouteAnimationFrame,
+  );
+};
+
 // 停止地图点击绘制
 const stopDrawing = () => {
   isDrawing.value = false;
@@ -110,6 +314,7 @@ const stopDrawing = () => {
 
 // 移除当前路线图层和坐标
 const removeCurrentRoute = () => {
+  stopRouteAnimation();
   currentRoutePoints.length = 0;
 
   if (map && routeLine) {
@@ -198,6 +403,7 @@ const undoLastPoint = () => {
     return;
   }
 
+  stopRouteAnimation();
   currentRoutePoints.pop();
   routeLine.setLatLngs(currentRoutePoints);
   emit("routeChange", getRoutePoints());
@@ -243,7 +449,7 @@ const initMap = () => {
   map = L.map(mapContainerRef.value, {
     minZoom: props.minZoom,
     maxZoom: props.maxZoom,
-    attributionControl:false,
+    attributionControl: false,
     maxBounds:
       initialBounds && props.restrictBounds
         ? initialBounds.pad(0.1)
@@ -292,6 +498,17 @@ watch(
   { deep: true },
 );
 
+// 监听外部 Marker 图片变化并更新动画图标
+watch(
+  () => props.routeMarkerImage,
+  () => {
+    if (!routeAnimationMarker) {
+      return;
+    }
+    routeAnimationMarker.setIcon(createRouteAnimationIcon());
+  },
+);
+
 // 页面挂载后创建地图
 onMounted(() => {
   initMap();
@@ -299,6 +516,7 @@ onMounted(() => {
 
 // 页面卸载时清理地图实例
 onBeforeUnmount(() => {
+  stopRouteAnimation();
   stopDrawing();
   map?.remove();
   map = null;
@@ -314,6 +532,9 @@ defineExpose<JOfflineMapExpose>({
   finishDrawing,
   undoLastPoint,
   fitRoute,
+  playRouteAnimation,
+  pauseRouteAnimation,
+  stopRouteAnimation,
 });
 </script>
 
@@ -325,6 +546,28 @@ defineExpose<JOfflineMapExpose>({
 
 <style>
 @import "leaflet/dist/leaflet.css";
+
+.j-offline-map__route-marker-icon {
+  background: transparent;
+  border: 0;
+}
+
+.j-offline-map__route-marker {
+  display: block;
+  width: 56px;
+  height: 56px;
+  filter: drop-shadow(0 2px 3px rgb(0 0 0 / 35%));
+  transform-origin: center;
+  will-change: transform;
+}
+
+.j-offline-map__route-marker img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  user-select: none;
+}
 </style>
 
 <style scoped>
