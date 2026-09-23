@@ -243,6 +243,7 @@ const initMap = () => {
   map = L.map(mapContainerRef.value, {
     minZoom: props.minZoom,
     maxZoom: props.maxZoom,
+    attributionControl:false,
     maxBounds:
       initialBounds && props.restrictBounds
         ? initialBounds.pad(0.1)
