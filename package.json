@@ -1,0 +1,63 @@
+{
+  "name": "j-offline-map",
+  "version": "1.0.0",
+  "description": "Vue 3 offline PMTiles map component based on Leaflet",
+  "type": "module",
+  "main": "./dist/j-offline-map.umd.cjs",
+  "module": "./dist/j-offline-map.js",
+  "types": "./dist/types/index.d.ts",
+  "unpkg": "./dist/j-offline-map.umd.cjs",
+  "jsdelivr": "./dist/j-offline-map.umd.cjs",
+  "exports": {
+    ".": {
+      "types": "./dist/types/index.d.ts",
+      "import": "./dist/j-offline-map.js",
+      "require": "./dist/j-offline-map.umd.cjs"
+    },
+    "./style.css": "./dist/style.css"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": [
+    "**/*.css"
+  ],
+  "scripts": {
+    "dev": "vite",
+    "build": "npm run build:lib",
+    "build:lib": "vite build && vue-tsc -p tsconfig.lib.json",
+    "build:demo": "vue-tsc -b && vite build --mode demo --outDir dist-demo",
+    "preview": "vite preview --outDir dist-demo",
+    "pack:check": "npm pack --dry-run",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "vue3",
+    "leaflet",
+    "pmtiles",
+    "offline-map",
+    "map"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "leaflet": "^1.9.4",
+    "vue": "^3.3.0"
+  },
+  "dependencies": {
+    "protomaps-leaflet": "^5.1.0"
+  },
+  "devDependencies": {
+    "@types/leaflet": "^1.9.22",
+    "@types/node": "^24.13.3",
+    "@vitejs/plugin-vue": "^6.0.8",
+    "@vue/tsconfig": "^0.9.1",
+    "leaflet": "^1.9.4",
+    "typescript": "~6.0.2",
+    "vite": "^8.3.0",
+    "vue": "^3.5.42",
+    "vue-tsc": "^3.3.11"
+  }
+}
