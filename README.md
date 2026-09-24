@@ -44,6 +44,17 @@ const routePoints: MapPoint[] = [
   { lat: 30.657037, lng: 104.066802 },
 ];
 
+// 当前选点，传入后会在地图上反显
+const selectedPoint = ref<MapPoint>({
+  lat: 30.814392,
+  lng: 104.017103,
+});
+
+// 接收点击地图选择的经纬度
+const handlePointSelect = (point: MapPoint) => {
+  selectedPoint.value = point;
+};
+
 // 接收手工绘制结果
 const handleDrawFinish = (points: MapPoint[]) => {
   console.log(points);
@@ -57,8 +68,13 @@ const handleDrawFinish = (points: MapPoint[]) => {
     :bounds="chinaBounds"
     :max-data-zoom="11"
     :route-points="routePoints"
+    :start-point="routePoints[0]"
+    :selected-point="selectedPoint"
+    point-selection-enabled
+    last-segment-dashed
     height="600px"
     @draw-finish="handleDrawFinish"
+    @point-select="handlePointSelect"
   />
 </template>
 ```
@@ -71,6 +87,10 @@ const handleDrawFinish = (points: MapPoint[]) => {
 | --- | --- | --- | --- |
 | `tileUrl` | `string` | 必填 | PMTiles 文件地址，需要支持 HTTP Range 请求 |
 | `routePoints` | `MapPoint[]` | `[]` | 外部传入的路线坐标，变化后自动重新绘制 |
+| `startPoint` | `MapPoint` | - | 可选的路线起始点，传入后显示固定的起点 Marker |
+| `selectedPoint` | `MapPoint` | - | 当前选点，传入后显示选点 Marker 并移动到可视区域 |
+| `pointSelectionEnabled` | `boolean` | `false` | 是否允许点击地图选择单个坐标 |
+| `lastSegmentDashed` | `boolean` | `false` | 是否将路线最后两个坐标之间的一段显示为虚线 |
 | `bounds` | `MapBounds` | - | 地图显示范围，同时作为地图拖动限制范围 |
 | `center` | `MapPoint` | 成都坐标 | 未传入 `bounds` 时使用的初始中心点 |
 | `zoom` | `number` | `7` | 未传入 `bounds` 时使用的初始缩放级别 |
@@ -85,6 +105,15 @@ const handleDrawFinish = (points: MapPoint[]) => {
 | `fitRouteOnChange` | `boolean` | `true` | 路线变化后是否自动缩放到完整路线范围 |
 | `routeStyle` | `RouteStyleOptions` | `{}` | 路线颜色、宽度和透明度配置 |
 | `routeMarkerImage` | `string` | 内置货车图片 | 路线动画 Marker 图片，支持 URL、静态资源路径或 `import` 后的图片地址 |
+
+## Events
+
+| 事件 | 参数 | 说明 |
+| --- | --- | --- |
+| `pointSelect` | `MapPoint` | 开启单点选择后，点击地图时返回所选经纬度 |
+| `update:selectedPoint` | `MapPoint` | 支持使用 `v-model:selected-point` 双向绑定当前选点 |
+| `routeChange` | `MapPoint[]` | 手工绘制、撤销或清空路线时返回当前路线点 |
+| `drawFinish` | `MapPoint[]` | 完成手工路线绘制时返回路线点 |
 
 ## 外部控制
 
@@ -119,6 +148,8 @@ mapRef.value?.clearRoute();
 ```
 
 路线动画会从传入路线的第一个点开始，按照各段实际距离匀速运行。路线坐标越密集，Marker 轨迹越贴近真实道路。
+
+组件会监听自身容器尺寸变化，并在 Tab 切换、弹窗展开、布局调整或窗口缩放后刷新地图尺寸；`fitRouteOnChange` 为 `true` 时会重新缩放到完整路线。
 
 自定义路线 Marker 图片：
 

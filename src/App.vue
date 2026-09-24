@@ -16,9 +16,21 @@ const chinaBounds: MapBounds = {
   northEast: { lat: 53.6, lng: 135.1 },
 };
 
+// 彭州城区路线起点，用于展示固定的起点 Marker
+const routeStartPoint: MapPoint = {
+  lat: 30.990442,
+  lng: 103.958232,
+};
+
+// 当前选点，初始值用于演示外部坐标反显
+const selectedPoint = ref<MapPoint>({
+  lat: 30.814392,
+  lng: 104.017103,
+});
+
 // 彭州城区到成都天府广场示例路线
 const pengzhouToChengduRoute: MapPoint[] = [
-  { lat: 30.990442, lng: 103.958232 },
+  routeStartPoint,
   { lat: 30.990221, lng: 103.961688 },
   { lat: 30.975256, lng: 103.962194 },
   { lat: 30.951238, lng: 103.954609 },
@@ -57,6 +69,11 @@ const playExampleRoute = () => {
 const handleDrawFinish = (points: MapPoint[]) => {
   console.log("绘制完成：", points);
 };
+
+// 接收地图点击选择的经纬度
+const handlePointSelect = (point: MapPoint) => {
+  selectedPoint.value = point;
+};
 </script>
 
 <template>
@@ -83,6 +100,10 @@ const handleDrawFinish = (points: MapPoint[]) => {
         撤销一点
       </button>
       <button type="button" @click="offlineMapRef?.clearRoute()">清除</button>
+      <span class="selected-point-text">
+        选点：{{ selectedPoint.lng.toFixed(6) }},
+        {{ selectedPoint.lat.toFixed(6) }}
+      </span>
     </div>
 
     <JOfflineMap
@@ -90,8 +111,13 @@ const handleDrawFinish = (points: MapPoint[]) => {
       tile-url="http://127.0.0.1:33312/china-z11.pmtiles"
       :bounds="chinaBounds"
       :max-data-zoom="11"
+      :start-point="routeStartPoint"
+      :selected-point="selectedPoint"
+      point-selection-enabled
+      last-segment-dashed
       height="100vh"
       @draw-finish="handleDrawFinish"
+      @point-select="handlePointSelect"
     />
   </main>
 </template>
@@ -128,5 +154,10 @@ const handleDrawFinish = (points: MapPoint[]) => {
 .demo-toolbar button:hover {
   color: #1677ff;
   border-color: #1677ff;
+}
+
+.selected-point-text {
+  align-self: center;
+  white-space: nowrap;
 }
 </style>

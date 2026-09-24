@@ -28,6 +28,12 @@ const props = withDefaults(
     tileUrl: string;
     /** 外部传入的路线坐标，变化后会自动重新绘制 */
     routePoints?: readonly MapPoint[];
+    /** 可选的路线起始点，传入后显示固定起点 Marker */
+    startPoint?: MapPoint;
+    /** 外部传入的当前选点，传入后显示选点 Marker */
+    selectedPoint?: MapPoint;
+    /** 是否允许点击地图选择单个坐标 */
+    pointSelectionEnabled?: boolean;
     /** 地图显示范围，同时作为 restrictBounds 的限制范围 */
     bounds?: MapBounds;
     /** 未传入 bounds 时使用的初始中心点 */
@@ -54,11 +60,16 @@ const props = withDefaults(
     fitRouteOnChange?: boolean;
     /** 路线颜色、宽度和透明度配置 */
     routeStyle?: RouteStyleOptions;
+    /** 是否将路线最后一段显示为虚线 */
+    lastSegmentDashed?: boolean;
     /** 路线动画 Marker 图片，支持外部 URL 或 import 后的图片地址 */
     routeMarkerImage?: string;
   }>(),
   {
     routePoints: () => [],
+    startPoint: undefined,
+    selectedPoint: undefined,
+    pointSelectionEnabled: false,
     bounds: undefined,
     center: () => ({ lat: 30.657, lng: 104.0668 }),
     zoom: 7,
@@ -72,6 +83,7 @@ const props = withDefaults(
     restrictBounds: true,
     fitRouteOnChange: true,
     routeStyle: () => ({}),
+    lastSegmentDashed: false,
     routeMarkerImage: defaultRouteMarkerImage,
   },
 );
@@ -80,6 +92,8 @@ const props = withDefaults(
 const emit = defineEmits<{
   drawFinish: [points: MapPoint[]];
   routeChange: [points: MapPoint[]];
+  pointSelect: [point: MapPoint];
+  "update:selectedPoint": [point: MapPoint];
 }>();
 
 // 地图容器和图层实例
@@ -88,6 +102,11 @@ const isDrawing = ref(false);
 let map: LeafletMap | null = null;
 let baseLayer: ReturnType<typeof leafletLayer> | null = null;
 let routeLine: L.Polyline | null = null;
+let lastSegmentLine: L.Polyline | null = null;
+let startPointMarker: L.Marker | null = null;
+let selectedPointMarker: L.Marker | null = null;
+let mapResizeObserver: ResizeObserver | null = null;
+let mapResizeFrameId: number | null = null;
 const currentRoutePoints: L.LatLng[] = [];
 
 // 路线动画运行状态
@@ -109,11 +128,29 @@ const currentRouteStyle = computed<L.PolylineOptions>(() => ({
   ...props.routeStyle,
 }));
 
+// 合并路线最后一段的虚线样式
+const currentLastSegmentStyle = computed<L.PolylineOptions>(() => ({
+  ...currentRouteStyle.value,
+  dashArray: "10 8",
+}));
+
 // 计算组件容器尺寸
 const rootStyle = computed<CSSProperties>(() => ({
   width: typeof props.width === "number" ? `${props.width}px` : props.width,
   height: typeof props.height === "number" ? `${props.height}px` : props.height,
 }));
+
+// 判断外部传入的坐标是否可用于地图展示
+const isValidMapPoint = (point?: MapPoint): point is MapPoint =>
+  Boolean(
+    point &&
+      Number.isFinite(point.lat) &&
+      Number.isFinite(point.lng) &&
+      point.lat >= -90 &&
+      point.lat <= 90 &&
+      point.lng >= -180 &&
+      point.lng <= 180,
+  );
 
 // 将组件边界转换为 Leaflet 边界
 const getLeafletBounds = (bounds: MapBounds) =>
@@ -176,6 +213,90 @@ const createRouteAnimationIcon = () => {
     iconAnchor: [28, 28],
   });
 };
+
+// 创建固定起点 Marker 图标
+const createStartPointIcon = () =>
+  L.divIcon({
+    className: "j-offline-map__start-marker-icon",
+    html: '<span class="j-offline-map__start-marker"><span>起</span></span>',
+    iconSize: [32, 40],
+    iconAnchor: [16, 40],
+  });
+
+// 根据 startPoint 更新固定起点 Marker
+const renderStartPointMarker = () => {
+  if (!map) {
+    return;
+  }
+
+  if (startPointMarker) {
+    map.removeLayer(startPointMarker);
+    startPointMarker = null;
+  }
+  if (!isValidMapPoint(props.startPoint)) {
+    return;
+  }
+
+  startPointMarker = L.marker([props.startPoint.lat, props.startPoint.lng], {
+    icon: createStartPointIcon(),
+    interactive: false,
+    keyboard: false,
+    zIndexOffset: 900,
+  }).addTo(map);
+};
+
+// 创建当前选点 Marker 图标
+const createSelectedPointIcon = () =>
+  L.divIcon({
+    className: "j-offline-map__selected-marker-icon",
+    html: '<span class="j-offline-map__selected-marker"><span>选</span></span>',
+    iconSize: [32, 40],
+    iconAnchor: [16, 40],
+  });
+
+// 根据外部值或点击结果更新选点 Marker
+const renderSelectedPointMarker = (
+  point: MapPoint | undefined = props.selectedPoint,
+  focus = false,
+) => {
+  if (!map) {
+    return;
+  }
+
+  if (selectedPointMarker) {
+    map.removeLayer(selectedPointMarker);
+    selectedPointMarker = null;
+  }
+  if (!isValidMapPoint(point)) {
+    return;
+  }
+
+  const latLng = L.latLng(point.lat, point.lng);
+  selectedPointMarker = L.marker(latLng, {
+    icon: createSelectedPointIcon(),
+    interactive: false,
+    keyboard: false,
+    zIndexOffset: 950,
+  }).addTo(map);
+  if (focus) {
+    map.panTo(latLng);
+  }
+};
+
+// 点击地图时选择单个坐标并向外通知
+function handlePointSelectClick(event: L.LeafletMouseEvent) {
+  if (isDrawing.value || !props.pointSelectionEnabled) {
+    return;
+  }
+
+  const point: MapPoint = {
+    lat: event.latlng.lat,
+    lng: event.latlng.lng,
+  };
+  renderSelectedPointMarker(point);
+  emit("pointSelect", point);
+  emit("update:selectedPoint", point);
+}
 
 // 更新 Marker 位置和朝向
 const updateRouteAnimationPosition = (progress: number) => {
@@ -312,6 +433,42 @@ const stopDrawing = () => {
   map?.off("click", handleMapClick);
 };
 
+// 根据路线点重绘实线部分和最后一段虚线
+const renderRouteLines = () => {
+  if (!map) {
+    return;
+  }
+
+  if (routeLine) {
+    map.removeLayer(routeLine);
+    routeLine = null;
+  }
+  if (lastSegmentLine) {
+    map.removeLayer(lastSegmentLine);
+    lastSegmentLine = null;
+  }
+  if (currentRoutePoints.length < 2) {
+    return;
+  }
+
+  if (!props.lastSegmentDashed) {
+    routeLine = L.polyline(
+      currentRoutePoints,
+      currentRouteStyle.value,
+    ).addTo(map);
+    return;
+  }
+
+  const solidPoints = currentRoutePoints.slice(0, -1);
+  if (solidPoints.length >= 2) {
+    routeLine = L.polyline(solidPoints, currentRouteStyle.value).addTo(map);
+  }
+  lastSegmentLine = L.polyline(
+    currentRoutePoints.slice(-2),
+    currentLastSegmentStyle.value,
+  ).addTo(map);
+};
+
 // 移除当前路线图层和坐标
 const removeCurrentRoute = () => {
   stopRouteAnimation();
@@ -320,17 +477,94 @@ const removeCurrentRoute = () => {
   if (map && routeLine) {
     map.removeLayer(routeLine);
   }
+  if (map && lastSegmentLine) {
+    map.removeLayer(lastSegmentLine);
+  }
 
   routeLine = null;
+  lastSegmentLine = null;
 };
 
 // 缩放到当前路线范围
 const fitRoute = () => {
-  if (!map || !routeLine || currentRoutePoints.length === 0) {
+  if (!map) {
     return;
   }
 
-  map.fitBounds(routeLine.getBounds(), { padding: [48, 48] });
+  const displayPoints = [...currentRoutePoints];
+  if (isValidMapPoint(props.startPoint)) {
+    displayPoints.push(L.latLng(props.startPoint.lat, props.startPoint.lng));
+  }
+  if (!displayPoints.length) {
+    return;
+  }
+
+  map.fitBounds(L.latLngBounds(displayPoints), { padding: [48, 48] });
+};
+
+// 在容器尺寸稳定后刷新 Leaflet 并重新适配当前内容
+const refreshMapViewport = () => {
+  if (!map || !mapContainerRef.value) {
+    return;
+  }
+  if (
+    mapContainerRef.value.clientWidth <= 0 ||
+    mapContainerRef.value.clientHeight <= 0
+  ) {
+    return;
+  }
+
+  map.invalidateSize({ animate: false, pan: false });
+  if (currentRoutePoints.length > 0) {
+    if (props.fitRouteOnChange) {
+      fitRoute();
+    }
+    return;
+  }
+  if (isValidMapPoint(props.selectedPoint)) {
+    map.panTo([props.selectedPoint.lat, props.selectedPoint.lng]);
+    return;
+  }
+  if (props.bounds) {
+    map.fitBounds(getLeafletBounds(props.bounds));
+  }
+};
+
+// 合并同一帧内多次容器尺寸变化
+const scheduleMapResize = () => {
+  if (mapResizeFrameId !== null) {
+    window.cancelAnimationFrame(mapResizeFrameId);
+  }
+  mapResizeFrameId = window.requestAnimationFrame(() => {
+    mapResizeFrameId = null;
+    refreshMapViewport();
+  });
+};
+
+// 停止监听地图容器尺寸
+const stopMapResizeObserver = () => {
+  mapResizeObserver?.disconnect();
+  mapResizeObserver = null;
+  window.removeEventListener("resize", scheduleMapResize);
+  if (mapResizeFrameId !== null) {
+    window.cancelAnimationFrame(mapResizeFrameId);
+    mapResizeFrameId = null;
+  }
+};
+
+// 监听 Tab、弹窗和布局变化后的地图实际尺寸
+const startMapResizeObserver = () => {
+  stopMapResizeObserver();
+  if (!mapContainerRef.value) {
+    return;
+  }
+  if (typeof ResizeObserver !== "undefined") {
+    mapResizeObserver = new ResizeObserver(scheduleMapResize);
+    mapResizeObserver.observe(mapContainerRef.value);
+  } else {
+    window.addEventListener("resize", scheduleMapResize);
+  }
+  scheduleMapResize();
 };
 
 // 绘制外部传入路线
@@ -349,7 +583,7 @@ const drawRoute = (points: readonly MapPoint[]) => {
   currentRoutePoints.push(
     ...points.map(({ lat, lng }) => L.latLng(lat, lng)),
   );
-  routeLine = L.polyline(currentRoutePoints, currentRouteStyle.value).addTo(map);
+  renderRouteLines();
 
   if (props.fitRouteOnChange) {
     fitRoute();
@@ -363,15 +597,7 @@ function handleMapClick(event: L.LeafletMouseEvent) {
   }
 
   currentRoutePoints.push(event.latlng);
-
-  if (!routeLine) {
-    routeLine = L.polyline(
-      currentRoutePoints,
-      currentRouteStyle.value,
-    ).addTo(map);
-  } else {
-    routeLine.setLatLngs(currentRoutePoints);
-  }
+  renderRouteLines();
 
   emit("routeChange", getRoutePoints());
 }
@@ -399,13 +625,13 @@ const finishDrawing = (): MapPoint[] => {
 
 // 撤销最后一个路线节点
 const undoLastPoint = () => {
-  if (!routeLine || currentRoutePoints.length === 0) {
+  if (currentRoutePoints.length === 0) {
     return;
   }
 
   stopRouteAnimation();
   currentRoutePoints.pop();
-  routeLine.setLatLngs(currentRoutePoints);
+  renderRouteLines();
   emit("routeChange", getRoutePoints());
 };
 
@@ -463,7 +689,10 @@ const initMap = () => {
     map.setView([props.center.lat, props.center.lng], props.zoom);
   }
 
+  map.on("click", handlePointSelectClick);
   loadBaseLayer();
+  renderStartPointMarker();
+  renderSelectedPointMarker(props.selectedPoint, true);
 
   if (props.routePoints.length > 0) {
     drawRoute(props.routePoints);
@@ -481,6 +710,27 @@ watch(
   { deep: true },
 );
 
+// 监听外部起始点变化并更新固定 Marker
+watch(
+  () => props.startPoint,
+  () => {
+    renderStartPointMarker();
+    if (props.fitRouteOnChange) {
+      fitRoute();
+    }
+  },
+  { deep: true },
+);
+
+// 监听外部选点变化并反显 Marker
+watch(
+  () => props.selectedPoint,
+  (point) => {
+    renderSelectedPointMarker(point, true);
+  },
+  { deep: true },
+);
+
 // 监听底图配置变化并重新加载
 watch(
   () => [props.tileUrl, props.flavor, props.lang, props.maxDataZoom] as const,
@@ -489,11 +739,11 @@ watch(
   },
 );
 
-// 监听路线样式变化并更新图层
+// 监听路线样式和末段模式变化并重绘图层
 watch(
-  currentRouteStyle,
-  (style) => {
-    routeLine?.setStyle(style);
+  [currentRouteStyle, currentLastSegmentStyle, () => props.lastSegmentDashed],
+  () => {
+    renderRouteLines();
   },
   { deep: true },
 );
@@ -512,16 +762,21 @@ watch(
 // 页面挂载后创建地图
 onMounted(() => {
   initMap();
+  startMapResizeObserver();
 });
 
 // 页面卸载时清理地图实例
 onBeforeUnmount(() => {
+  stopMapResizeObserver();
   stopRouteAnimation();
   stopDrawing();
   map?.remove();
   map = null;
   baseLayer = null;
   routeLine = null;
+  lastSegmentLine = null;
+  startPointMarker = null;
+  selectedPointMarker = null;
 });
 
 // 暴露外部地图控制方法
@@ -567,6 +822,60 @@ defineExpose<JOfflineMapExpose>({
   height: 100%;
   object-fit: contain;
   user-select: none;
+}
+
+.j-offline-map__start-marker-icon {
+  background: transparent;
+  border: 0;
+}
+
+.j-offline-map__start-marker {
+  box-sizing: border-box;
+  display: grid;
+  width: 32px;
+  height: 32px;
+  border: 3px solid #fff;
+  border-radius: 50% 50% 50% 0;
+  background: #16a34a;
+  box-shadow: 0 2px 6px rgb(0 0 0 / 35%);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+  place-items: center;
+  transform: rotate(-45deg);
+}
+
+.j-offline-map__start-marker > span {
+  display: block;
+  transform: rotate(45deg);
+}
+
+.j-offline-map__selected-marker-icon {
+  background: transparent;
+  border: 0;
+}
+
+.j-offline-map__selected-marker {
+  box-sizing: border-box;
+  display: grid;
+  width: 32px;
+  height: 32px;
+  border: 3px solid #fff;
+  border-radius: 50% 50% 50% 0;
+  background: #1677ff;
+  box-shadow: 0 2px 6px rgb(0 0 0 / 35%);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+  place-items: center;
+  transform: rotate(-45deg);
+}
+
+.j-offline-map__selected-marker > span {
+  display: block;
+  transform: rotate(45deg);
 }
 </style>
 
