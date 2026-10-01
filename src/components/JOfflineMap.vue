@@ -249,7 +249,7 @@ const renderStartPointMarker = () => {
 const createSelectedPointIcon = () =>
   L.divIcon({
     className: "j-offline-map__selected-marker-icon",
-    html: '<span class="j-offline-map__selected-marker"><span>选</span></span>',
+    html: '<span class="j-offline-map__selected-marker"><span></span></span>',
     iconSize: [32, 40],
     iconAnchor: [16, 40],
   });
