@@ -9,16 +9,32 @@ import type {
   MapBounds,
   MapFlavor,
   MapPoint,
+  MapRoute,
   RouteAnimationOptions,
   RouteStyleOptions,
 } from "../types";
 
+// 路线动画分段信息
 interface RouteAnimationSegment {
   from: L.LatLng;
   to: L.LatLng;
   startDistance: number;
   length: number;
   bearing: number;
+}
+
+// 每条路线独立保存车辆和播放进度
+interface RouteAnimationState {
+  points: L.LatLng[];
+  workPackageName: string;
+  marker: L.Marker | null;
+  frameId: number | null;
+  startedAt: number;
+  elapsed: number;
+  duration: number;
+  loop: boolean;
+  segments: RouteAnimationSegment[];
+  totalDistance: number;
 }
 
 // 组件输入参数
@@ -28,6 +44,8 @@ const props = withDefaults(
     tileUrl: string;
     /** 外部传入的路线坐标，变化后会自动重新绘制 */
     routePoints?: readonly MapPoint[];
+    /** 同一地图上展示的多条路线，可分别配置样式和起点 */
+    routes?: readonly MapRoute[];
     /** 可选的路线起始点，传入后显示固定起点 Marker */
     startPoint?: MapPoint;
     /** 外部传入的当前选点，传入后显示选点 Marker */
@@ -64,9 +82,12 @@ const props = withDefaults(
     lastSegmentDashed?: boolean;
     /** 路线动画 Marker 图片，支持外部 URL 或 import 后的图片地址 */
     routeMarkerImage?: string;
+    /** 单路线车辆动画图标上方的可选名称，多路线使用各自的名称 */
+    workPackageName?: string;
   }>(),
   {
     routePoints: () => [],
+    routes: () => [],
     startPoint: undefined,
     selectedPoint: undefined,
     pointSelectionEnabled: false,
@@ -85,6 +106,7 @@ const props = withDefaults(
     routeStyle: () => ({}),
     lastSegmentDashed: false,
     routeMarkerImage: defaultRouteMarkerImage,
+    workPackageName: "",
   },
 );
 
@@ -109,16 +131,31 @@ let mapResizeObserver: ResizeObserver | null = null;
 let mapResizeFrameId: number | null = null;
 const currentRoutePoints: L.LatLng[] = [];
 
-// 路线动画运行状态
+// 多路线图层与坐标，独立于当前手绘路线
+let routesLayer: L.LayerGroup | null = null;
+let currentRoutes: MapRoute[] = [];
+
+// 创建独立的路线动画状态
 const DEFAULT_ROUTE_ANIMATION_DURATION = 12000;
-let routeAnimationMarker: L.Marker | null = null;
-let routeAnimationFrameId: number | null = null;
-let routeAnimationStartedAt = 0;
-let routeAnimationElapsed = 0;
-let routeAnimationDuration = DEFAULT_ROUTE_ANIMATION_DURATION;
-let routeAnimationLoop = true;
-let routeAnimationSegments: RouteAnimationSegment[] = [];
-let routeAnimationTotalDistance = 0;
+const createRouteAnimationState = (
+  points: L.LatLng[],
+  workPackageName = "",
+): RouteAnimationState => ({
+  points,
+  workPackageName,
+  marker: null,
+  frameId: null,
+  startedAt: 0,
+  elapsed: 0,
+  duration: DEFAULT_ROUTE_ANIMATION_DURATION,
+  loop: true,
+  segments: [],
+  totalDistance: 0,
+});
+
+// 单路线与多路线分别管理动画，统一对外控制
+const singleRouteAnimation = createRouteAnimationState(currentRoutePoints);
+let routesAnimations: RouteAnimationState[] = [];
 
 // 合并路线显示样式
 const currentRouteStyle = computed<L.PolylineOptions>(() => ({
@@ -177,10 +214,10 @@ const getBearing = (from: L.LatLng, to: L.LatLng) => {
 };
 
 // 创建路线动画分段数据
-const createRouteAnimationSegments = () => {
+const createRouteAnimationSegments = (animation: RouteAnimationState) => {
   let totalDistance = 0;
-  routeAnimationSegments = currentRoutePoints.slice(0, -1).map((from, index) => {
-    const to = currentRoutePoints[index + 1];
+  animation.segments = animation.points.slice(0, -1).map((from, index) => {
+    const to = animation.points[index + 1];
     const length = from.distanceTo(to);
     const segment = {
       from,
@@ -192,11 +229,13 @@ const createRouteAnimationSegments = () => {
     totalDistance += length;
     return segment;
   });
-  routeAnimationTotalDistance = totalDistance;
+  animation.totalDistance = totalDistance;
 };
 
 // 创建沿路线移动的 Marker 图标
-const createRouteAnimationIcon = () => {
+const createRouteAnimationIcon = (workPackageName: string) => {
+  const markerContainer = document.createElement("span");
+  markerContainer.className = "j-offline-map__route-marker-content";
   const markerElement = document.createElement("span");
   markerElement.className = "j-offline-map__route-marker";
 
@@ -205,10 +244,18 @@ const createRouteAnimationIcon = () => {
   markerImage.alt = "";
   markerImage.draggable = false;
   markerElement.appendChild(markerImage);
+  markerContainer.appendChild(markerElement);
+
+  // 工作包名称独立于车辆旋转，按纯文本展示
+  const markerLabel = document.createElement("span");
+  markerLabel.className = "j-offline-map__route-marker-label";
+  markerLabel.textContent = workPackageName.trim();
+  markerLabel.title = workPackageName.trim();
+  markerContainer.appendChild(markerLabel);
 
   return L.divIcon({
     className: "j-offline-map__route-marker-icon",
-    html: markerElement,
+    html: markerContainer,
     iconSize: [56, 56],
     iconAnchor: [28, 28],
   });
@@ -298,17 +345,20 @@ function handlePointSelectClick(event: L.LeafletMouseEvent) {
   emit("update:selectedPoint", point);
 }
 
-// 更新 Marker 位置和朝向
-const updateRouteAnimationPosition = (progress: number) => {
-  if (!routeAnimationMarker || !routeAnimationSegments.length) {
+// 更新指定路线车辆的位置和朝向
+const updateRouteAnimationPosition = (
+  animation: RouteAnimationState,
+  progress: number,
+) => {
+  if (!animation.marker || !animation.segments.length) {
     return;
   }
 
-  const targetDistance = routeAnimationTotalDistance * progress;
+  const targetDistance = animation.totalDistance * progress;
   const segment =
-    routeAnimationSegments.find(
+    animation.segments.find(
       (item) => targetDistance <= item.startDistance + item.length,
-    ) || routeAnimationSegments[routeAnimationSegments.length - 1];
+    ) || animation.segments[animation.segments.length - 1];
   const segmentProgress = segment.length
     ? Math.min(
         Math.max((targetDistance - segment.startDistance) / segment.length, 0),
@@ -320,8 +370,8 @@ const updateRouteAnimationPosition = (progress: number) => {
     segment.from.lng + (segment.to.lng - segment.from.lng) * segmentProgress,
   );
 
-  routeAnimationMarker.setLatLng(nextPosition);
-  const markerElement = routeAnimationMarker
+  animation.marker.setLatLng(nextPosition);
+  const markerElement = animation.marker
     .getElement()
     ?.querySelector<HTMLElement>(".j-offline-map__route-marker");
   if (markerElement) {
@@ -329,102 +379,141 @@ const updateRouteAnimationPosition = (progress: number) => {
   }
 };
 
-// 执行路线动画的下一帧
-const renderRouteAnimationFrame = (timestamp: number) => {
+// 获取指定路线当前播放进度
+const getRouteAnimationElapsed = (
+  animation: RouteAnimationState,
+  timestamp = window.performance.now(),
+) => {
   const elapsed =
-    routeAnimationElapsed + Math.max(timestamp - routeAnimationStartedAt, 0);
-  const rawProgress = elapsed / routeAnimationDuration;
-  const progress = routeAnimationLoop
-    ? rawProgress % 1
-    : Math.min(rawProgress, 1);
-  updateRouteAnimationPosition(progress);
+    animation.elapsed +
+    (animation.frameId === null
+      ? 0
+      : Math.max(timestamp - animation.startedAt, 0));
+  return animation.loop
+    ? elapsed % animation.duration
+    : Math.min(elapsed, animation.duration);
+};
 
-  if (!routeAnimationLoop && rawProgress >= 1) {
-    routeAnimationFrameId = null;
-    routeAnimationStartedAt = 0;
-    routeAnimationElapsed = routeAnimationDuration;
+// 执行指定路线动画的下一帧
+const renderRouteAnimationFrame = (
+  animation: RouteAnimationState,
+  timestamp: number,
+) => {
+  const elapsed =
+    animation.elapsed + Math.max(timestamp - animation.startedAt, 0);
+  const rawProgress = elapsed / animation.duration;
+  const progress = animation.loop ? rawProgress % 1 : Math.min(rawProgress, 1);
+  updateRouteAnimationPosition(animation, progress);
+
+  if (!animation.loop && rawProgress >= 1) {
+    animation.frameId = null;
+    animation.startedAt = 0;
+    animation.elapsed = animation.duration;
     return;
   }
 
-  routeAnimationFrameId = window.requestAnimationFrame(
-    renderRouteAnimationFrame,
-  );
+  animation.frameId = window.requestAnimationFrame((nextTimestamp) => {
+    renderRouteAnimationFrame(animation, nextTimestamp);
+  });
 };
 
-// 暂停当前路线动画
-const pauseRouteAnimation = () => {
-  if (routeAnimationFrameId === null) {
+// 暂停指定路线动画并保存独立进度
+const pauseAnimation = (animation: RouteAnimationState) => {
+  if (animation.frameId === null) {
     return;
   }
 
-  const currentElapsed =
-    routeAnimationElapsed +
-    Math.max(window.performance.now() - routeAnimationStartedAt, 0);
-  routeAnimationElapsed = routeAnimationLoop
-    ? currentElapsed % routeAnimationDuration
-    : Math.min(currentElapsed, routeAnimationDuration);
-  window.cancelAnimationFrame(routeAnimationFrameId);
-  routeAnimationFrameId = null;
-  routeAnimationStartedAt = 0;
+  animation.elapsed = getRouteAnimationElapsed(animation);
+  window.cancelAnimationFrame(animation.frameId);
+  animation.frameId = null;
+  animation.startedAt = 0;
+  updateRouteAnimationPosition(animation, animation.elapsed / animation.duration);
 };
 
-// 停止路线动画并移除箭头
-const stopRouteAnimation = () => {
-  if (routeAnimationFrameId !== null) {
-    window.cancelAnimationFrame(routeAnimationFrameId);
+// 停止指定路线动画并清理车辆和进度
+const stopAnimation = (animation: RouteAnimationState) => {
+  if (animation.frameId !== null) {
+    window.cancelAnimationFrame(animation.frameId);
   }
-
-  if (map && routeAnimationMarker) {
-    map.removeLayer(routeAnimationMarker);
-  }
-
-  routeAnimationMarker = null;
-  routeAnimationFrameId = null;
-  routeAnimationStartedAt = 0;
-  routeAnimationElapsed = 0;
-  routeAnimationDuration = DEFAULT_ROUTE_ANIMATION_DURATION;
-  routeAnimationLoop = true;
-  routeAnimationSegments = [];
-  routeAnimationTotalDistance = 0;
+  animation.marker?.remove();
+  animation.marker = null;
+  animation.frameId = null;
+  animation.startedAt = 0;
+  animation.elapsed = 0;
+  animation.duration = DEFAULT_ROUTE_ANIMATION_DURATION;
+  animation.loop = true;
+  animation.segments = [];
+  animation.totalDistance = 0;
 };
 
-// 播放或继续播放当前路线动画
-const playRouteAnimation = (options: RouteAnimationOptions = {}) => {
-  if (!map || currentRoutePoints.length < 2 || routeAnimationFrameId !== null) {
+// 播放或继续指定路线动画
+const playAnimation = (
+  animation: RouteAnimationState,
+  options: RouteAnimationOptions = {},
+) => {
+  if (!map || animation.points.length < 2 || animation.frameId !== null) {
     return;
   }
 
-  if (options.duration !== undefined) {
-    routeAnimationDuration = Math.max(options.duration, 100);
+  if (options.duration !== undefined && Number.isFinite(options.duration)) {
+    animation.duration = Math.max(options.duration, 100);
   }
   if (options.loop !== undefined) {
-    routeAnimationLoop = options.loop;
+    animation.loop = options.loop;
   }
-
-  if (!routeAnimationSegments.length) {
-    createRouteAnimationSegments();
+  if (!animation.segments.length) {
+    createRouteAnimationSegments(animation);
   }
-  if (!routeAnimationTotalDistance) {
+  if (!animation.totalDistance) {
     return;
   }
-
-  if (routeAnimationElapsed >= routeAnimationDuration) {
-    routeAnimationElapsed = 0;
+  if (animation.elapsed >= animation.duration) {
+    animation.elapsed = 0;
   }
-  if (!routeAnimationMarker) {
-    routeAnimationMarker = L.marker(currentRoutePoints[0], {
-      icon: createRouteAnimationIcon(),
+  if (!animation.marker) {
+    animation.marker = L.marker(animation.points[0], {
+      icon: createRouteAnimationIcon(animation.workPackageName),
       interactive: false,
       keyboard: false,
       zIndexOffset: 1000,
     }).addTo(map);
   }
 
-  updateRouteAnimationPosition(routeAnimationElapsed / routeAnimationDuration);
-  routeAnimationStartedAt = window.performance.now();
-  routeAnimationFrameId = window.requestAnimationFrame(
-    renderRouteAnimationFrame,
-  );
+  updateRouteAnimationPosition(animation, animation.elapsed / animation.duration);
+  animation.startedAt = window.performance.now();
+  animation.frameId = window.requestAnimationFrame((timestamp) => {
+    renderRouteAnimationFrame(animation, timestamp);
+  });
+};
+
+// 暂停地图上所有路线的车辆动画
+const pauseRouteAnimation = () => {
+  [singleRouteAnimation, ...routesAnimations].forEach(pauseAnimation);
+};
+
+// 停止所有路线动画并移除车辆
+const stopRouteAnimation = () => {
+  [singleRouteAnimation, ...routesAnimations].forEach(stopAnimation);
+};
+
+// 播放所有路线动画，每条有效路线对应一个车辆
+const playRouteAnimation = (options: RouteAnimationOptions = {}) => {
+  singleRouteAnimation.workPackageName = props.workPackageName;
+  [singleRouteAnimation, ...routesAnimations].forEach((animation) => {
+    playAnimation(animation, options);
+  });
+};
+
+// 更新指定路线的工作包标签，保留车辆位置和播放进度
+const updateAnimationLabel = (animation: RouteAnimationState, name: string) => {
+  animation.workPackageName = name;
+  const label = animation.marker
+    ?.getElement()
+    ?.querySelector<HTMLElement>(".j-offline-map__route-marker-label");
+  if (label) {
+    label.textContent = name.trim();
+    label.title = name.trim();
+  }
 };
 
 // 停止地图点击绘制
@@ -469,9 +558,59 @@ const renderRouteLines = () => {
   ).addTo(map);
 };
 
+// 重绘多条独立路线，分别应用样式和起点配置
+const renderRoutes = () => {
+  if (!map) {
+    return;
+  }
+
+  if (!routesLayer) {
+    routesLayer = L.layerGroup().addTo(map);
+  }
+  const layer = routesLayer;
+  layer.clearLayers();
+
+  currentRoutes.forEach((route) => {
+    const points = route.points.map(({ lat, lng }) => L.latLng(lat, lng));
+    const style: L.PolylineOptions = {
+      ...currentRouteStyle.value,
+      ...route.style,
+    };
+    if (points.length >= 2) {
+      if (route.lastSegmentDashed ?? props.lastSegmentDashed) {
+        const solidPoints = points.slice(0, -1);
+        if (solidPoints.length >= 2) {
+          L.polyline(solidPoints, style).addTo(layer);
+        }
+        L.polyline(points.slice(-2), { ...style, dashArray: "10 8" }).addTo(
+          layer,
+        );
+      } else {
+        L.polyline(points, style).addTo(layer);
+      }
+    }
+    if (isValidMapPoint(route.startPoint)) {
+      L.marker([route.startPoint.lat, route.startPoint.lng], {
+        icon: createStartPointIcon(),
+        interactive: false,
+        keyboard: false,
+        zIndexOffset: 900,
+      }).addTo(layer);
+    }
+  });
+};
+
+// 清除批量展示的路线和对应起点
+const clearRoutes = () => {
+  routesAnimations.forEach(stopAnimation);
+  routesAnimations = [];
+  routesLayer?.clearLayers();
+  currentRoutes = [];
+};
+
 // 移除当前路线图层和坐标
 const removeCurrentRoute = () => {
-  stopRouteAnimation();
+  stopAnimation(singleRouteAnimation);
   currentRoutePoints.length = 0;
 
   if (map && routeLine) {
@@ -485,16 +624,28 @@ const removeCurrentRoute = () => {
   lastSegmentLine = null;
 };
 
-// 缩放到当前路线范围
+// 获取所有路线及起点的展示坐标
+const getDisplayPoints = (): L.LatLng[] => {
+  const points = [...currentRoutePoints];
+  currentRoutes.forEach((route) => {
+    points.push(...route.points.map(({ lat, lng }) => L.latLng(lat, lng)));
+    if (isValidMapPoint(route.startPoint)) {
+      points.push(L.latLng(route.startPoint.lat, route.startPoint.lng));
+    }
+  });
+  if (isValidMapPoint(props.startPoint)) {
+    points.push(L.latLng(props.startPoint.lat, props.startPoint.lng));
+  }
+  return points;
+};
+
+// 缩放到所有路线和起点的范围
 const fitRoute = () => {
   if (!map) {
     return;
   }
 
-  const displayPoints = [...currentRoutePoints];
-  if (isValidMapPoint(props.startPoint)) {
-    displayPoints.push(L.latLng(props.startPoint.lat, props.startPoint.lng));
-  }
+  const displayPoints = getDisplayPoints();
   if (!displayPoints.length) {
     return;
   }
@@ -515,7 +666,12 @@ const refreshMapViewport = () => {
   }
 
   map.invalidateSize({ animate: false, pan: false });
-  if (currentRoutePoints.length > 0) {
+  if (
+    currentRoutePoints.length > 0 ||
+    currentRoutes.some(
+      (route) => route.points.length > 0 || isValidMapPoint(route.startPoint),
+    )
+  ) {
     if (props.fitRouteOnChange) {
       fitRoute();
     }
@@ -581,10 +737,63 @@ const drawRoute = (points: readonly MapPoint[]) => {
   }
 
   currentRoutePoints.push(
-    ...points.map(({ lat, lng }) => L.latLng(lat, lng)),
+    ...points.filter(isValidMapPoint).map(({ lat, lng }) => L.latLng(lat, lng)),
   );
   renderRouteLines();
 
+  if (props.fitRouteOnChange) {
+    fitRoute();
+  }
+};
+
+// 批量替换路线及关联车辆，坐标未变时保留动画进度
+const drawRoutes = (routes: readonly MapRoute[]) => {
+  const runningAnimation = routesAnimations.find(
+    (animation) => animation.frameId !== null,
+  );
+  const playbackOptions = runningAnimation
+    ? { duration: runningAnimation.duration, loop: runningAnimation.loop }
+    : undefined;
+  const previousAnimations = routesAnimations;
+  currentRoutes = routes.map((route) => ({
+    points: route.points
+      .filter(isValidMapPoint)
+      .map(({ lat, lng }) => ({ lat, lng })),
+    workPackageName: route.workPackageName ?? "",
+    style: route.style ? { ...route.style } : undefined,
+    lastSegmentDashed: route.lastSegmentDashed,
+    startPoint: isValidMapPoint(route.startPoint)
+      ? { ...route.startPoint }
+      : undefined,
+  }));
+  routesAnimations = currentRoutes.map((route, index) => {
+    const previous = previousAnimations[index];
+    if (
+      previous &&
+      previous.points.length === route.points.length &&
+      previous.points.every((point, pointIndex) => {
+        const next = route.points[pointIndex];
+        return point.lat === next.lat && point.lng === next.lng;
+      })
+    ) {
+      updateAnimationLabel(previous, route.workPackageName ?? "");
+      return previous;
+    }
+    if (previous) {
+      stopAnimation(previous);
+    }
+    return createRouteAnimationState(
+      route.points.map(({ lat, lng }) => L.latLng(lat, lng)),
+      route.workPackageName,
+    );
+  });
+  previousAnimations.slice(currentRoutes.length).forEach(stopAnimation);
+  renderRoutes();
+  if (playbackOptions) {
+    routesAnimations.forEach((animation) => {
+      playAnimation(animation, playbackOptions);
+    });
+  }
   if (props.fitRouteOnChange) {
     fitRoute();
   }
@@ -629,7 +838,7 @@ const undoLastPoint = () => {
     return;
   }
 
-  stopRouteAnimation();
+  stopAnimation(singleRouteAnimation);
   currentRoutePoints.pop();
   renderRouteLines();
   emit("routeChange", getRoutePoints());
@@ -697,6 +906,9 @@ const initMap = () => {
   if (props.routePoints.length > 0) {
     drawRoute(props.routePoints);
   }
+  if (props.routes.length > 0) {
+    drawRoutes(props.routes);
+  }
 };
 
 // 监听外部路线变化并重新绘制
@@ -706,6 +918,15 @@ watch(
     if (map) {
       drawRoute(points);
     }
+  },
+  { deep: true },
+);
+
+// 监听多路线坐标和独立配置变化并重新绘制
+watch(
+  () => props.routes,
+  (routes) => {
+    drawRoutes(routes);
   },
   { deep: true },
 );
@@ -744,18 +965,35 @@ watch(
   [currentRouteStyle, currentLastSegmentStyle, () => props.lastSegmentDashed],
   () => {
     renderRouteLines();
+    renderRoutes();
   },
   { deep: true },
 );
 
-// 监听外部 Marker 图片变化并更新动画图标
+// 监听公共车辆图片变化并刷新所有图标，保留当前位置和朝向
 watch(
   () => props.routeMarkerImage,
   () => {
-    if (!routeAnimationMarker) {
-      return;
-    }
-    routeAnimationMarker.setIcon(createRouteAnimationIcon());
+    [singleRouteAnimation, ...routesAnimations].forEach((animation) => {
+      if (!animation.marker) {
+        return;
+      }
+      animation.marker.setIcon(
+        createRouteAnimationIcon(animation.workPackageName),
+      );
+      updateRouteAnimationPosition(
+        animation,
+        getRouteAnimationElapsed(animation) / animation.duration,
+      );
+    });
+  },
+);
+
+// 监听单路线可选名称变化，多路线名称由各条路线配置
+watch(
+  () => props.workPackageName,
+  (name) => {
+    updateAnimationLabel(singleRouteAnimation, name);
   },
 );
 
@@ -770,11 +1008,13 @@ onBeforeUnmount(() => {
   stopMapResizeObserver();
   stopRouteAnimation();
   stopDrawing();
+  clearRoutes();
   map?.remove();
   map = null;
   baseLayer = null;
   routeLine = null;
   lastSegmentLine = null;
+  routesLayer = null;
   startPointMarker = null;
   selectedPointMarker = null;
 });
@@ -783,6 +1023,8 @@ onBeforeUnmount(() => {
 defineExpose<JOfflineMapExpose>({
   drawRoute,
   clearRoute,
+  drawRoutes,
+  clearRoutes,
   startDrawing,
   finishDrawing,
   undoLastPoint,
@@ -805,6 +1047,37 @@ defineExpose<JOfflineMapExpose>({
 .j-offline-map__route-marker-icon {
   background: transparent;
   border: 0;
+}
+
+.j-offline-map__route-marker-content {
+  position: relative;
+  display: block;
+  width: 56px;
+  height: 56px;
+}
+
+.j-offline-map__route-marker-label {
+  position: absolute;
+  bottom: calc(100% - 12px);
+  left: 50%;
+  width: max-content;
+  max-width: 240px;
+  padding: 4px 8px;
+  border: 1px solid #d9d9d9;
+  border-radius: 4px;
+  background: #fff;
+  box-shadow: 0 2px 6px rgb(0 0 0 / 20%);
+  color: #1f2329;
+  font-size: 12px;
+  line-height: 18px;
+  text-align: center;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+  transform: translateX(-50%);
+}
+
+.j-offline-map__route-marker-label:empty {
+  display: none;
 }
 
 .j-offline-map__route-marker {

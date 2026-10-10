@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { nextTick, ref } from "vue";
 import JOfflineMap from "./components/JOfflineMap.vue";
 import type {
   JOfflineMapExpose,
   MapBounds,
   MapPoint,
+  MapRoute,
 } from "./types";
 
 // 地图组件实例
@@ -54,20 +55,79 @@ const pengzhouToChengduRoute: MapPoint[] = [
   { lat: 30.657037, lng: 104.066802 },
 ];
 
+// 多路线示例，分别展示颜色、独立起点和末段虚线
+const exampleRoutes: MapRoute[] = [
+  {
+    points: pengzhouToChengduRoute,
+    workPackageName: "彭州到成都运输工作包",
+    startPoint: routeStartPoint,
+    style: { color: "#1677ff" },
+    lastSegmentDashed: false,
+  },
+  {
+    workPackageName: "成都到青白江运输工作包",
+    points: [
+      { lat: 30.664, lng: 104.072 },
+      { lat: 30.705, lng: 104.13 },
+      { lat: 30.755, lng: 104.18 },
+      { lat: 30.83, lng: 104.24 },
+    ],
+    startPoint: { lat: 30.664, lng: 104.072 },
+    style: { color: "#f97316", weight: 5 },
+    lastSegmentDashed: true,
+  },
+];
+const routes = ref<MapRoute[]>([...exampleRoutes]);
+
+// 加载多条示例路线
+const loadExampleRoutes = () => {
+  offlineMapRef.value?.clearRoute();
+  routes.value = [...exampleRoutes];
+};
+
 // 加载示例路线
 const loadExampleRoute = () => {
+  routes.value = [];
+  offlineMapRef.value?.clearRoutes();
   offlineMapRef.value?.drawRoute(pengzhouToChengduRoute);
 };
 
-// 加载路线并播放循环箭头动画
+// 加载无名称的单路线并播放车辆动画
 const playExampleRoute = () => {
-  offlineMapRef.value?.drawRoute(pengzhouToChengduRoute);
+  loadExampleRoute();
   offlineMapRef.value?.playRouteAnimation({ duration: 10000, loop: true });
 };
 
-// 输出手工绘制完成的路线
+// 等待多路线绑定更新后播放各工作包车辆动画
+const playExampleRoutes = async () => {
+  loadExampleRoutes();
+  await nextTick();
+  offlineMapRef.value?.playRouteAnimation({ duration: 10000, loop: true });
+};
+
+// 将完成的手绘路线追加到多路线列表
 const handleDrawFinish = (points: MapPoint[]) => {
-  console.log("绘制完成：", points);
+  if (points.length < 2) {
+    return;
+  }
+  routes.value = [
+    ...routes.value,
+    {
+      points,
+      workPackageName: `手绘工作包${routes.value.length + 1}`,
+      startPoint: points[0],
+      style: { color: "#16a34a" },
+      lastSegmentDashed: false,
+    },
+  ];
+  offlineMapRef.value?.clearRoute();
+};
+
+// 清除当前路线及多路线列表
+const clearAllRoutes = () => {
+  routes.value = [];
+  offlineMapRef.value?.clearRoute();
+  offlineMapRef.value?.clearRoutes();
 };
 
 // 接收地图点击选择的经纬度
@@ -79,8 +139,10 @@ const handlePointSelect = (point: MapPoint) => {
 <template>
   <main class="demo-page">
     <div class="demo-toolbar" @click.stop @pointerdown.stop>
+      <button type="button" @click="loadExampleRoutes">加载多条路线</button>
       <button type="button" @click="loadExampleRoute">加载彭州到成都示例</button>
-      <button type="button" @click="playExampleRoute">播放路线动画</button>
+      <button type="button" @click="playExampleRoutes">播放多工作包车辆</button>
+      <button type="button" @click="playExampleRoute">播放无名称单路径</button>
       <button type="button" @click="offlineMapRef?.pauseRouteAnimation()">
         暂停动画
       </button>
@@ -94,12 +156,13 @@ const handlePointSelect = (point: MapPoint) => {
         开始画线
       </button>
       <button type="button" @click="offlineMapRef?.finishDrawing()">
-        完成
+        完成并追加
       </button>
       <button type="button" @click="offlineMapRef?.undoLastPoint()">
         撤销一点
       </button>
-      <button type="button" @click="offlineMapRef?.clearRoute()">清除</button>
+      <button type="button" @click="clearAllRoutes">清除全部</button>
+      <span class="selected-point-text">路线：{{ routes.length }} 条</span>
       <span class="selected-point-text">
         选点：{{ selectedPoint.lng.toFixed(6) }},
         {{ selectedPoint.lat.toFixed(6) }}
@@ -111,6 +174,7 @@ const handlePointSelect = (point: MapPoint) => {
       tile-url="http://127.0.0.1:33312/china-z11.pmtiles"
       :bounds="chinaBounds"
       :max-data-zoom="11"
+      :routes="routes"
       :start-point="routeStartPoint"
       :selected-point="selectedPoint"
       point-selection-enabled
@@ -133,8 +197,10 @@ const handlePointSelect = (point: MapPoint) => {
   position: absolute;
   top: 16px;
   left: 56px;
+  right: 16px;
   z-index: 1100;
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   padding: 8px;
   background: #fff;

@@ -17,6 +17,16 @@ export interface RouteStyleOptions {
   opacity?: number;
 }
 
+// 同一地图上的独立路线配置
+export interface MapRoute {
+  points: readonly MapPoint[];
+  /** 该路线车辆上显示的工作包名称，不传则隐藏 */
+  workPackageName?: string;
+  style?: RouteStyleOptions;
+  lastSegmentDashed?: boolean;
+  startPoint?: MapPoint;
+}
+
 // 离线底图主题
 export type MapFlavor = "light" | "dark" | "white" | "grayscale" | "black";
 
@@ -32,6 +42,8 @@ export interface RouteAnimationOptions {
 export interface JOfflineMapExpose {
   drawRoute: (points: readonly MapPoint[]) => void;
   clearRoute: () => void;
+  drawRoutes: (routes: readonly MapRoute[]) => void;
+  clearRoutes: () => void;
   startDrawing: () => void;
   finishDrawing: () => MapPoint[];
   undoLastPoint: () => void;
